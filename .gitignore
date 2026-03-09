@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Secrets & credentials
+*.pem
+*.key
+*.crt
+*.p12
+credentials.*
+secrets.*
+*.secret
+
+# Scraped data & sessions
+data/
+sessions/
+logs/
+*.log
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS
+desktop.ini
+ehthumbs.db
+
+# Playwright / browser
+playwright-report/
+test-results/

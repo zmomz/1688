@@ -169,12 +169,37 @@ async def _get_or_create_page(context: BrowserContext) -> Page:
 
 async def _navigate_to_homepage(page: Page):
     """Navigate to 1688 homepage if not already there."""
-    if "1688.com" in page.url and "login" not in page.url:
+    if page.url.startswith(HOMEPAGE_URL) and "login" not in page.url:
         return
     # Use JS navigation instead of page.goto() to avoid CDP detection
     await page.evaluate(f"window.location.href = '{HOMEPAGE_URL}'")
     await page.wait_for_load_state("domcontentloaded", timeout=config.PAGE_TIMEOUT)
     await asyncio.sleep(2)
+
+
+async def _search_via_url(page: Page, keyword: str) -> bool:
+    """Navigate directly to search results URL as a fallback."""
+    # 1688.com uses GBK encoding for search keywords
+    try:
+        encoded = keyword.encode("gbk")
+        encoded_kw = "".join(f"%{b:02X}" for b in encoded)
+    except (UnicodeEncodeError, LookupError):
+        from urllib.parse import quote
+        encoded_kw = quote(keyword)
+
+    search_url = f"{config.SEARCH_URL}?keywords={encoded_kw}"
+    logger.info("Falling back to direct URL navigation: %s", search_url)
+    await page.evaluate(f"window.location.href = '{search_url}'")
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=config.PAGE_TIMEOUT)
+    except Exception:
+        pass
+    await asyncio.sleep(3)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=config.NETWORK_IDLE_TIMEOUT)
+    except Exception:
+        logger.debug("networkidle timeout after URL navigation, proceeding")
+    return True
 
 
 async def _search_via_searchbox(page: Page, keyword: str) -> bool:
@@ -189,6 +214,17 @@ async def _search_via_searchbox(page: Page, keyword: str) -> bool:
 
     # Type keyword like a human
     await _human_type(page, input_selector, keyword)
+
+    # Dismiss autocomplete dropdown before submitting
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(0.3)
+
+    # Re-focus the search input
+    await page.click(input_selector)
+    await asyncio.sleep(0.2)
+
+    # Capture current URL to verify navigation later
+    url_before = page.url
 
     # Find and click search button
     btn_el, btn_selector = await _find_element(page, SEARCH_BUTTON_SELECTORS)
@@ -210,6 +246,14 @@ async def _search_via_searchbox(page: Page, keyword: str) -> bool:
         await page.wait_for_load_state("networkidle", timeout=config.NETWORK_IDLE_TIMEOUT)
     except Exception:
         logger.debug("networkidle timeout after search, proceeding")
+
+    # Verify we actually navigated to search results
+    if page.url == url_before or "offer_search" not in page.url:
+        logger.warning(
+            "Search box did not navigate (still at %s), falling back to direct URL",
+            page.url,
+        )
+        return await _search_via_url(page, keyword)
 
     return True
 
@@ -582,8 +626,10 @@ async def scrape_search(
         # Type keyword into search box and search
         logger.info("Searching for '%s' via search box", keyword)
         if not await _search_via_searchbox(page, keyword):
-            logger.error("Could not find search box on page")
-            return []
+            logger.warning("Could not find search box, falling back to direct URL")
+            if not await _search_via_url(page, keyword):
+                logger.error("All search methods failed")
+                return []
 
         # Check for anti-bot
         if not await is_session_valid(page):

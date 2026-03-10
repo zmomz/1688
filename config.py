@@ -14,10 +14,10 @@ LOGIN_URL = "https://login.1688.com/member/signin.htm"
 DETAIL_URL_PATTERN = "https://detail.1688.com/offer/{offer_id}.html"
 
 # --- Browser Settings ---
-HEADLESS = True
 VIEWPORT = {"width": 1366, "height": 768}
 LOCALE = "zh-CN"
 TIMEZONE = "Asia/Shanghai"
+CDP_PORT = 9222  # Chrome DevTools Protocol port for remote debugging
 
 # --- Scraping Limits ---
 MAX_PAGES = 5

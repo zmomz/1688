@@ -8,7 +8,7 @@ import sys
 from playwright.async_api import async_playwright
 
 import config
-from auth import is_session_valid, load_session, login_and_save_session
+from auth import CDP_PORT, connect_to_chrome, is_session_valid, login_and_connect
 from models import SessionExpiredError
 from scraper_detail import scrape_details_batch
 from scraper_search import dump_page_html, scrape_search
@@ -28,15 +28,15 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py "手机壳" --login              # First run: manual login
-  python main.py "手机壳" --pages 3            # Search only, JSON output
+  python main.py --login                       # Launch Chrome and log in
+  python main.py "手机壳" --login              # Login then search immediately
+  python main.py "手机壳" --pages 3            # Search (Chrome must be running)
   python main.py "手机壳" --pages 2 --details  # Search + detail pages
   python main.py "手机壳" --format csv         # CSV output
-  python main.py "手机壳" --headed             # Visible browser for debug
   python main.py "手机壳" --dump-html          # Dump page HTML for debugging
         """,
     )
-    parser.add_argument("keyword", help="Search keyword (e.g. Chinese product name)")
+    parser.add_argument("keyword", nargs="?", default=None, help="Search keyword (e.g. Chinese product name)")
     parser.add_argument(
         "--pages", type=int, default=config.MAX_PAGES,
         help=f"Max search result pages to scrape (default: {config.MAX_PAGES})"
@@ -51,38 +51,44 @@ Examples:
     )
     parser.add_argument(
         "--login", action="store_true",
-        help="Force a new manual login session"
-    )
-    parser.add_argument(
-        "--headed", action="store_true",
-        help="Run browser in visible (headed) mode"
+        help="Launch Chrome with remote debugging for manual login"
     )
     parser.add_argument(
         "--dump-html", action="store_true",
         help="Dump search page HTML to file for debugging selectors"
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if not args.keyword and not args.login:
+        parser.error("keyword is required (unless using --login alone)")
+
+    return args
 
 
 async def run_scraper(args):
     """Main scraping workflow."""
-    # Ensure directories exist
     config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Handle login
-    if args.login or not config.SESSION_FILE.exists():
-        if not config.SESSION_FILE.exists():
-            logger.info("No session found. Starting login flow...")
-        await login_and_save_session()
+    # Handle login — launches Chrome with CDP for manual login
+    if args.login:
+        await login_and_connect()
+        print("Chrome is running. You can now scrape without --login.")
+        print("Keep Chrome open in the background.\n")
 
-    headless = not args.headed
+        if not args.keyword:
+            return
 
+    # Connect to Chrome via CDP
     async with async_playwright() as p:
         try:
-            browser, context = await load_session(p, headless=headless)
-        except FileNotFoundError as e:
-            logger.error(str(e))
+            browser, context = await connect_to_chrome(p)
+        except Exception as e:
+            logger.error("Cannot connect to Chrome: %s", e)
+            print("\nChrome is not running with remote debugging.")
+            print(f"Run: python main.py \"{args.keyword}\" --login")
+            print(f"\nOr launch Chrome manually with:")
+            print(f"  chrome --remote-debugging-port={CDP_PORT} --user-data-dir=\"{config.SESSION_DIR / 'chrome_profile'}\"")
             sys.exit(1)
 
         try:
@@ -100,9 +106,8 @@ async def run_scraper(args):
 
             if not products:
                 print("No products found. Try:")
-                print("  1. Run with --headed to see what's happening")
-                print("  2. Run with --dump-html to inspect the page")
-                print("  3. Re-login with --login if session expired")
+                print("  1. Run with --dump-html to inspect the page")
+                print("  2. Re-login with --login if session expired")
                 return
 
             # Detail pages
@@ -119,7 +124,6 @@ async def run_scraper(args):
             logger.error(str(e))
             print("\nSession expired! Run again with --login to re-authenticate.")
 
-            # Save partial data if any
             if "products" in locals() and products:
                 filepath = save_products(products, args.keyword, args.format)
                 print(f"Partial data saved to: {filepath}")
@@ -128,14 +132,10 @@ async def run_scraper(args):
         except Exception as e:
             logger.error("Unexpected error: %s", e, exc_info=True)
 
-            # Save partial data if any
             if "products" in locals() and products:
                 filepath = save_products(products, args.keyword, args.format)
                 print(f"Partial data saved to: {filepath}")
             sys.exit(1)
-
-        finally:
-            await browser.close()
 
 
 def main():

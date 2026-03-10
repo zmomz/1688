@@ -40,12 +40,11 @@ async def lifespan(app: FastAPI):
 
     try:
         await session_mgr.initialize()
-    except FileNotFoundError:
-        logger.error(
-            "No browser session found. Run 'python main.py --login' first to authenticate."
-        )
     except Exception as e:
-        logger.error("Failed to initialize browser: %s", e)
+        logger.error(
+            "Could not connect to Chrome: %s. "
+            "Run 'python main.py --login' first to launch Chrome with remote debugging.", e
+        )
 
     yield
 
@@ -71,7 +70,7 @@ async def websocket_endpoint(websocket: WebSocket):
     if not session_mgr.is_initialized:
         await websocket.send_json({
             "type": "error",
-            "text": "Browser session not loaded. Run 'python main.py --login' in terminal, then restart the app.",
+            "text": "Not connected to Chrome. Run 'python main.py --login' in terminal to launch Chrome, then restart the app.",
         })
 
     ollama_ok = await check_ollama_health()
@@ -119,7 +118,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if not session_mgr.is_initialized:
                 await websocket.send_json({
                     "type": "error",
-                    "text": "Browser session not available. Run 'python main.py --login' first.",
+                    "text": "Not connected to Chrome. Run 'python main.py --login' first.",
                 })
                 continue
 

@@ -218,3 +218,55 @@ class TestRunScraper:
              patch("main.load_session", new_callable=AsyncMock, side_effect=FileNotFoundError("no session")):
             with pytest.raises(SystemExit):
                 await run_scraper(_make_args())
+
+    @pytest.mark.asyncio
+    async def test_missing_session_file_triggers_login(self, tmp_path, monkeypatch):
+        """When session file doesn't exist and --login not set, login is triggered."""
+        import config
+        # Remove the session file created by the autouse fixture
+        session_file = config.SESSION_FILE
+        if session_file.exists():
+            session_file.unlink()
+
+        mock_browser = AsyncMock()
+        mock_context = AsyncMock()
+
+        with patch("main.async_playwright") as mock_pw, \
+             patch("main.load_session", new_callable=AsyncMock, return_value=(mock_browser, mock_context)), \
+             patch("main.login_and_save_session", new_callable=AsyncMock) as mock_login, \
+             patch("main.scrape_search", new_callable=AsyncMock, return_value=[]):
+            await run_scraper(_make_args(login=False))
+            mock_login.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_session_expired_partial_save(self, tmp_path):
+        """SessionExpiredError saves partial data when products were already scraped."""
+        mock_browser = AsyncMock()
+        mock_context = AsyncMock()
+        products = [Product(id="1", title="partial")]
+
+        with patch("main.async_playwright") as mock_pw, \
+             patch("main.load_session", new_callable=AsyncMock, return_value=(mock_browser, mock_context)), \
+             patch("main.scrape_search", new_callable=AsyncMock, return_value=products), \
+             patch("main.scrape_details_batch", new_callable=AsyncMock, side_effect=SessionExpiredError("expired")), \
+             patch("main.save_products", return_value=Path("/fake/partial.json")) as mock_save:
+            with pytest.raises(SystemExit):
+                await run_scraper(_make_args(details=True))
+            # Products were captured before the detail scraping error
+            mock_save.assert_called_once_with(products, "test", "json")
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_partial_save(self, tmp_path):
+        """Unexpected error saves partial data when products were already scraped."""
+        mock_browser = AsyncMock()
+        mock_context = AsyncMock()
+        products = [Product(id="1", title="partial")]
+
+        with patch("main.async_playwright") as mock_pw, \
+             patch("main.load_session", new_callable=AsyncMock, return_value=(mock_browser, mock_context)), \
+             patch("main.scrape_search", new_callable=AsyncMock, return_value=products), \
+             patch("main.scrape_details_batch", new_callable=AsyncMock, side_effect=RuntimeError("boom")), \
+             patch("main.save_products", return_value=Path("/fake/partial.json")) as mock_save:
+            with pytest.raises(SystemExit):
+                await run_scraper(_make_args(details=True))
+            mock_save.assert_called_once_with(products, "test", "json")

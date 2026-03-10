@@ -662,6 +662,80 @@ class TestScrapeSearch:
             # Should stop after page 1 since no next page
             assert mock_extract.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_networkidle_timeout_continues(self, mock_context, mock_page):
+        """scrape_search proceeds when networkidle times out."""
+        mock_page.wait_for_load_state = AsyncMock(side_effect=Exception("timeout"))
+        with patch("scraper_search._scroll_page", new_callable=AsyncMock), \
+             patch("scraper_search.is_session_valid", new_callable=AsyncMock, return_value=True), \
+             patch("scraper_search._extract_products_from_page", new_callable=AsyncMock) as mock_extract, \
+             patch("scraper_search.asyncio.sleep", new_callable=AsyncMock):
+            mock_extract.return_value = [Product(id="1")]
+            mock_page.query_selector = AsyncMock(return_value=None)
+            products = await scrape_search(mock_context, "test", max_pages=1)
+            assert len(products) == 1
+
+    @pytest.mark.asyncio
+    async def test_redirect_logs_warning(self, mock_context, mock_page):
+        """scrape_search logs a warning when the page URL differs from requested URL."""
+        mock_page.url = "https://www.1688.com/redirected"
+        with patch("scraper_search._scroll_page", new_callable=AsyncMock), \
+             patch("scraper_search.is_session_valid", new_callable=AsyncMock, return_value=True), \
+             patch("scraper_search._extract_products_from_page", new_callable=AsyncMock) as mock_extract, \
+             patch("scraper_search.asyncio.sleep", new_callable=AsyncMock), \
+             patch("scraper_search.logger") as mock_logger:
+            mock_extract.return_value = [Product(id="1")]
+            mock_page.query_selector = AsyncMock(return_value=None)
+            await scrape_search(mock_context, "test", max_pages=1)
+            # Should have logged a redirect warning
+            redirect_calls = [
+                c for c in mock_logger.warning.call_args_list
+                if "redirected" in str(c).lower()
+            ]
+            assert len(redirect_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_screenshot_failure_continues(self, mock_context, mock_page, tmp_data_dir):
+        """scrape_search continues when screenshot fails."""
+        mock_page.screenshot = AsyncMock(side_effect=Exception("screenshot failed"))
+        with patch("scraper_search._scroll_page", new_callable=AsyncMock), \
+             patch("scraper_search.is_session_valid", new_callable=AsyncMock, return_value=True), \
+             patch("scraper_search._extract_products_from_page", new_callable=AsyncMock) as mock_extract, \
+             patch("scraper_search.asyncio.sleep", new_callable=AsyncMock):
+            mock_extract.return_value = [Product(id="1")]
+            mock_page.query_selector = AsyncMock(return_value=None)
+            products = await scrape_search(mock_context, "test", max_pages=1)
+            assert len(products) == 1
+
+    @pytest.mark.asyncio
+    async def test_uses_gbk_encoding_in_search_url(self, mock_context, mock_page):
+        """scrape_search encodes keywords as GBK in the URL."""
+        with patch("scraper_search._scroll_page", new_callable=AsyncMock), \
+             patch("scraper_search.is_session_valid", new_callable=AsyncMock, return_value=True), \
+             patch("scraper_search._extract_products_from_page", new_callable=AsyncMock, return_value=[]), \
+             patch("scraper_search.asyncio.sleep", new_callable=AsyncMock):
+            mock_page.query_selector = AsyncMock(return_value=None)
+            await scrape_search(mock_context, "手机壳", max_pages=1)
+        goto_url = mock_page.goto.call_args[0][0]
+        assert "%CA%D6%BB%FA%BF%C7" in goto_url  # GBK
+        assert "%E6%89%8B" not in goto_url  # not UTF-8
+
+    @pytest.mark.asyncio
+    async def test_multi_page_calls_random_delay(self, mock_context, mock_page):
+        """scrape_search calls _random_delay between pages when next page exists."""
+        next_btn = AsyncMock()  # truthy = next page exists
+        with patch("scraper_search._scroll_page", new_callable=AsyncMock), \
+             patch("scraper_search.is_session_valid", new_callable=AsyncMock, return_value=True), \
+             patch("scraper_search._extract_products_from_page", new_callable=AsyncMock) as mock_extract, \
+             patch("scraper_search._random_delay", new_callable=AsyncMock) as mock_delay, \
+             patch("scraper_search.asyncio.sleep", new_callable=AsyncMock):
+            mock_extract.return_value = [Product(id="1")]
+            # Page 1: next button found → delay → Page 2: no next button
+            mock_page.query_selector = AsyncMock(side_effect=[next_btn, None])
+            products = await scrape_search(mock_context, "test", max_pages=2)
+            assert mock_extract.call_count == 2
+            mock_delay.assert_called_once()
+
 
 # ── dump_page_html ────────────────────────────────────────────────────────────
 
@@ -695,3 +769,15 @@ class TestDumpPageHtml:
         goto_url = mock_page.goto.call_args[0][0]
         assert "%CA%D6%BB%FA%BF%C7" in goto_url  # 手机壳 in GBK
         assert "%E6%89%8B" not in goto_url  # NOT UTF-8 for 手
+
+    @pytest.mark.asyncio
+    async def test_networkidle_timeout_continues(self, mock_context, mock_page, tmp_data_dir):
+        """dump_page_html proceeds when networkidle times out."""
+        mock_page.content = AsyncMock(return_value="<html>ok</html>")
+        mock_page.wait_for_load_state = AsyncMock(side_effect=Exception("timeout"))
+        with patch("scraper_search._scroll_page", new_callable=AsyncMock), \
+             patch("scraper_search.asyncio.sleep", new_callable=AsyncMock):
+            path = await dump_page_html(mock_context, "test")
+        assert "debug_search_page.html" in path
+        html_path = tmp_data_dir / "debug_search_page.html"
+        assert html_path.read_text(encoding="utf-8") == "<html>ok</html>"

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>1688 Product Search</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="chat-container">
+        <header class="chat-header">
+            <h1>1688 Product Search</h1>
+            <span id="status" class="status status-connecting">Connecting...</span>
+        </header>
+
+        <div id="messages" class="messages">
+            <div class="message assistant">
+                <div class="bubble">
+                    Welcome! Describe the products you're looking for and I'll search 1688.com for you.
+                    <br><br>
+                    <em>Examples: "I need phone cases", "silicone kitchen utensils", "LED strip lights wholesale"</em>
+                </div>
+            </div>
+        </div>
+
+        <div id="progress-bar" class="progress-bar" style="display: none;">
+            <span id="progress-text"></span>
+        </div>
+
+        <form id="chat-form" class="chat-input">
+            <input type="text" id="user-input" placeholder="Describe products you want to find..." autocomplete="off">
+            <button type="submit" id="send-btn">Send</button>
+        </form>
+    </div>
+
+    <script src="/static/chat.js"></script>
+</body>
+</html>

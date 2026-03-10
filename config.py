@@ -34,6 +34,16 @@ SCROLL_STEP = 400  # pixels per scroll step
 # --- Output ---
 OUTPUT_FORMAT = "json"  # "json" or "csv"
 
+# --- Ollama ---
+OLLAMA_URL = "http://localhost:11434"
+OLLAMA_MODEL = "llama3.2:latest"
+OLLAMA_TIMEOUT = 60  # seconds
+
+# --- Web App ---
+WEB_HOST = "0.0.0.0"
+WEB_PORT = 8000
+DEFAULT_SEARCH_PAGES = 2  # fewer pages per term in chat mode for speed
+
 # --- CSS Selectors (update these when 1688.com changes markup) ---
 SELECTORS = {
     # Search results page

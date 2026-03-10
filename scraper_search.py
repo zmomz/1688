@@ -103,79 +103,244 @@ async def _extract_products_from_page(page: Page) -> list[Product]:
     """Extract product data from the current search results page."""
     products = []
 
-    # Try configured selectors first
+    # ---- Strategy 1: Extract from embedded JSON data ----
+    # 1688 often embeds structured data in script tags (__INIT_DATA, __APLUS_DATA, etc.)
+    raw_json_products = await page.evaluate(r"""() => {
+        // Look for __INIT_DATA or similar embedded data structures
+        const scripts = document.querySelectorAll('script');
+        for (const script of scripts) {
+            const text = script.textContent || '';
+
+            // Try __INIT_DATA (common on 1688 search pages)
+            if (text.includes('__INIT_DATA')) {
+                try {
+                    const match = text.match(/__INIT_DATA\s*=\s*({[\s\S]*?});?\s*(?:<\/script>|$)/);
+                    if (match) {
+                        const data = JSON.parse(match[1]);
+                        // Navigate common data paths for search results
+                        const offers = data?.data?.mainInfo?.offerList
+                            || data?.data?.offerList
+                            || data?.globalData?.tempModel?.offerList
+                            || data?.data?.data?.offerList
+                            || [];
+                        if (offers.length > 0) return { source: '__INIT_DATA', offers };
+                    }
+                } catch(e) {}
+            }
+
+            // Try window.__page_data or window.pageData
+            if (text.includes('__page_data') || text.includes('pageData')) {
+                try {
+                    const match = text.match(/(?:__page_data|pageData)\s*=\s*({[\s\S]*?});?\s*(?:<\/script>|$)/);
+                    if (match) {
+                        const data = JSON.parse(match[1]);
+                        const offers = data?.offerList || data?.data?.offerList || [];
+                        if (offers.length > 0) return { source: 'pageData', offers };
+                    }
+                } catch(e) {}
+            }
+        }
+
+        // Try accessing window globals directly
+        try {
+            const initData = window.__INIT_DATA || window.__APLUS_DATA;
+            if (initData) {
+                const offers = initData?.data?.mainInfo?.offerList
+                    || initData?.data?.offerList
+                    || initData?.globalData?.tempModel?.offerList
+                    || [];
+                if (offers.length > 0) return { source: 'window_global', offers };
+            }
+        } catch(e) {}
+
+        return null;
+    }""")
+
+    if raw_json_products and raw_json_products.get("offers"):
+        logger.info(
+            "Extracted %d offers from embedded JSON (%s)",
+            len(raw_json_products["offers"]),
+            raw_json_products["source"],
+        )
+        for offer in raw_json_products["offers"]:
+            try:
+                offer_id = str(
+                    offer.get("id", "")
+                    or offer.get("offerId", "")
+                    or offer.get("offer_id", "")
+                )
+                if not offer_id:
+                    continue
+
+                title = (
+                    offer.get("subject", "")
+                    or offer.get("title", "")
+                    or offer.get("offerTitle", "")
+                    or ""
+                )
+
+                # Price - try multiple common field names
+                price_str = (
+                    offer.get("priceDisplay", "")
+                    or offer.get("price", "")
+                    or offer.get("tradePrice", "")
+                    or ""
+                )
+                if isinstance(price_str, (int, float)):
+                    price_min = price_max = float(price_str)
+                else:
+                    price_min, price_max = _parse_price(str(price_str))
+
+                # MOQ
+                moq_str = (
+                    offer.get("quantityBegin", "")
+                    or offer.get("moq", "")
+                    or ""
+                )
+                if isinstance(moq_str, (int, float)):
+                    moq, moq_unit = int(moq_str), "件"
+                else:
+                    moq, moq_unit = _parse_moq(str(moq_str))
+
+                # Image
+                image_url = (
+                    offer.get("image", {}).get("imgUrl", "")
+                    if isinstance(offer.get("image"), dict)
+                    else offer.get("imageUrl", "")
+                    or offer.get("imgUrl", "")
+                    or offer.get("image", "")
+                    or ""
+                )
+                if isinstance(image_url, dict):
+                    image_url = ""
+                if image_url and image_url.startswith("//"):
+                    image_url = "https:" + image_url
+
+                # URL
+                url = offer.get("detailUrl", "") or offer.get("offerUrl", "") or ""
+                if not url:
+                    url = f"https://detail.1688.com/offer/{offer_id}.html"
+                elif url.startswith("//"):
+                    url = "https:" + url
+
+                # Supplier
+                company = offer.get("company", {}) if isinstance(offer.get("company"), dict) else {}
+                supplier_name = (
+                    company.get("name", "")
+                    or offer.get("companyName", "")
+                    or ""
+                )
+                supplier_url = company.get("url", "") or ""
+                if supplier_url and supplier_url.startswith("//"):
+                    supplier_url = "https:" + supplier_url
+
+                supplier_location = company.get("location", "") or ""
+
+                products.append(Product(
+                    id=offer_id,
+                    title=title,
+                    url=url,
+                    price_min=price_min,
+                    price_max=price_max,
+                    moq=moq,
+                    moq_unit=moq_unit,
+                    supplier_name=supplier_name,
+                    supplier_url=supplier_url,
+                    supplier_location=supplier_location,
+                    image_url=image_url,
+                ))
+            except Exception as e:
+                logger.debug("Error parsing JSON offer: %s", e)
+                continue
+
+        if products:
+            return products
+        logger.info("JSON extraction found offers but couldn't parse them, falling back to DOM")
+
+    # ---- Strategy 2: CSS selector-based extraction ----
     cards = await page.query_selector_all(config.SELECTORS["product_card"])
 
-    # Fallback: find all links to detail pages and work from their parent elements
     if not cards:
-        logger.info("Primary selectors found no cards, trying fallback...")
-        cards = await page.evaluate("""() => {
-            const links = document.querySelectorAll('a[href*="detail.1688.com/offer/"]');
-            const parents = new Set();
-            links.forEach(link => {
-                // Go up a few levels to find the card container
-                let el = link.parentElement;
-                for (let i = 0; i < 5 && el; i++) {
-                    if (el.offsetHeight > 100 && el.offsetWidth > 150) {
-                        parents.add(el);
-                        break;
-                    }
-                    el = el.parentElement;
-                }
-            });
-            return Array.from(parents).map(el => el.outerHTML);
-        }""")
-        if cards and isinstance(cards, list) and isinstance(cards[0], str):
-            # We got HTML strings from JS, need to re-query
-            # Instead, use a different approach
-            cards = []
-
-    if not cards:
-        # Last resort: extract data directly via JavaScript
-        logger.info("Attempting JavaScript-based extraction...")
-        raw_products = await page.evaluate("""() => {
+        # ---- Strategy 3: JavaScript DOM extraction (improved) ----
+        logger.info("CSS selectors found no cards, trying JS DOM extraction...")
+        raw_products = await page.evaluate(r"""() => {
             const results = [];
-            const links = document.querySelectorAll('a[href*="detail.1688.com/offer/"]');
+            const links = document.querySelectorAll('a[href*="detail.1688.com/offer/"], a[href*="offer/"]');
             const seen = new Set();
+            const usedCards = new Set();
 
             for (const link of links) {
                 const href = link.href || '';
-                const match = href.match(/offer\\/(\\d+)/);
+                const match = href.match(/offer\/(\d+)/);
                 if (!match || seen.has(match[1])) continue;
                 seen.add(match[1]);
 
-                // Walk up to find the card container
+                // Walk up to find the card container, but stop early to avoid
+                // reaching a shared parent. Look for an element that contains
+                // exactly one offer link and has reasonable dimensions.
                 let card = link;
-                for (let i = 0; i < 8; i++) {
-                    if (card.parentElement) card = card.parentElement;
-                    if (card.offsetHeight > 100) break;
+                let bestCard = link;
+                for (let i = 0; i < 6; i++) {
+                    if (!card.parentElement) break;
+                    card = card.parentElement;
+                    // Count how many offer links are in this container
+                    const offerLinks = card.querySelectorAll('a[href*="offer/"]');
+                    const uniqueOffers = new Set();
+                    offerLinks.forEach(l => {
+                        const m = (l.href || '').match(/offer\/(\d+)/);
+                        if (m) uniqueOffers.add(m[1]);
+                    });
+                    // Good card: contains only this offer, has some size
+                    if (uniqueOffers.size === 1 && card.offsetHeight > 50) {
+                        bestCard = card;
+                    }
+                    // Stop if we've reached a container with many offers
+                    if (uniqueOffers.size > 1) break;
                 }
 
-                // Extract text and images from the card area
-                const text = card.innerText || '';
-                const imgs = card.querySelectorAll('img');
+                // Skip if we've already used this card element
+                if (usedCards.has(bestCard)) continue;
+                usedCards.add(bestCard);
+
+                // Find the closest image to the link (not from the whole card)
                 let imgSrc = '';
+                const imgs = bestCard.querySelectorAll('img');
                 for (const img of imgs) {
-                    const src = img.src || img.dataset.src || '';
-                    if (src && !src.includes('avatar') && !src.includes('icon')) {
+                    const src = img.src || img.dataset.src || img.getAttribute('data-lazyload-src') || '';
+                    if (src && !src.includes('avatar') && !src.includes('icon') && src.length > 20) {
                         imgSrc = src;
                         break;
                     }
                 }
 
-                // Try to find title - usually the link text or nearby heading
-                let title = link.innerText || link.title || '';
+                // Title: prefer the link's own text, then look for title-like elements
+                let title = '';
+                const titleEl = bestCard.querySelector('[class*="title"], [class*="Title"], h2, h3, h4');
+                if (titleEl) {
+                    title = titleEl.innerText || '';
+                }
                 if (!title) {
-                    const h = card.querySelector('h2, h3, h4, [class*="title"]');
-                    if (h) title = h.innerText;
+                    title = link.innerText || link.title || link.getAttribute('title') || '';
+                }
+                // Clean title: remove price/sales text that might be mixed in
+                title = title.split('\n')[0].trim();
+
+                // Price: look for price-specific elements within the card
+                let priceText = '';
+                const priceEl = bestCard.querySelector('[class*="price"], [class*="Price"]');
+                if (priceEl) {
+                    priceText = priceEl.innerText || '';
                 }
 
-                // Try to find price
-                const priceEl = card.querySelector('[class*="price"], [class*="Price"]');
-                const priceText = priceEl ? priceEl.innerText : '';
+                // MOQ
+                let moqText = '';
+                const moqEl = bestCard.querySelector('[class*="moq"], [class*="MOQ"], [class*="起批"], [class*="quantity"]');
+                if (moqEl) {
+                    moqText = moqEl.innerText || '';
+                }
 
-                // Try to find supplier
-                const companyLinks = card.querySelectorAll('a[href*="shop"], a[href*="company"], a[class*="company"]');
+                // Supplier
+                const companyLinks = bestCard.querySelectorAll('a[href*="shop"], a[href*="company"], a[class*="company"]');
                 let supplierName = '';
                 let supplierUrl = '';
                 for (const cl of companyLinks) {
@@ -188,13 +353,13 @@ async def _extract_products_from_page(page: Page) -> list[Product]:
 
                 results.push({
                     id: match[1],
-                    title: title.trim().substring(0, 200),
-                    url: href,
+                    title: title.substring(0, 200),
+                    url: href.startsWith('//') ? 'https:' + href : href,
                     priceText: priceText,
-                    imgSrc: imgSrc,
+                    moqText: moqText,
+                    imgSrc: imgSrc.startsWith('//') ? 'https:' + imgSrc : imgSrc,
                     supplierName: supplierName,
                     supplierUrl: supplierUrl,
-                    fullText: text.substring(0, 500),
                 });
             }
             return results;
@@ -202,7 +367,7 @@ async def _extract_products_from_page(page: Page) -> list[Product]:
 
         for raw in (raw_products or []):
             price_min, price_max = _parse_price(raw.get("priceText", ""))
-            moq, moq_unit = _parse_moq(raw.get("fullText", ""))
+            moq, moq_unit = _parse_moq(raw.get("moqText", ""))
             products.append(Product(
                 id=raw.get("id", ""),
                 title=raw.get("title", ""),
@@ -295,7 +460,7 @@ async def scrape_search(
 
     try:
         for page_num in range(1, max_pages + 1):
-            url = f"{config.SEARCH_URL}?keywords={quote(keyword)}&beginPage={page_num}"
+            url = f"{config.SEARCH_URL}?keywords={quote(keyword.encode('gbk'), safe='')}&beginPage={page_num}"
             logger.info("Scraping search page %d: %s", page_num, url)
 
             await page.goto(url, timeout=config.PAGE_TIMEOUT, wait_until="domcontentloaded")
@@ -308,11 +473,25 @@ async def scrape_search(
             except Exception:
                 logger.debug("networkidle timeout, proceeding anyway")
 
+            # Log the actual URL after any redirects
+            actual_url = page.url
+            if actual_url != url:
+                logger.warning("Page redirected: %s -> %s", url, actual_url)
+
             # Check session validity
             if not await is_session_valid(page):
                 raise SessionExpiredError(
                     "Session expired or CAPTCHA detected. Re-run with --login."
                 )
+
+            # Save debug screenshot for first page
+            if page_num == 1:
+                try:
+                    screenshot_path = config.DATA_DIR / "debug_search_screenshot.png"
+                    await page.screenshot(path=str(screenshot_path), full_page=False)
+                    logger.info("Debug screenshot saved to %s", screenshot_path)
+                except Exception as e:
+                    logger.debug("Could not save screenshot: %s", e)
 
             # Scroll to load lazy content
             await _scroll_page(page)
@@ -343,7 +522,7 @@ async def scrape_search(
 async def dump_page_html(context: BrowserContext, keyword: str) -> str:
     """Debug helper: dump search page HTML to a file for selector inspection."""
     page = await context.new_page()
-    url = f"{config.SEARCH_URL}?keywords={quote(keyword)}&beginPage=1"
+    url = f"{config.SEARCH_URL}?keywords={quote(keyword.encode('gbk'), safe='')}&beginPage=1"
     await page.goto(url, timeout=config.PAGE_TIMEOUT, wait_until="domcontentloaded")
     await asyncio.sleep(3)
     try:
@@ -357,6 +536,14 @@ async def dump_page_html(context: BrowserContext, keyword: str) -> str:
     dump_path.parent.mkdir(parents=True, exist_ok=True)
     dump_path.write_text(html, encoding="utf-8")
     logger.info("Page HTML dumped to %s", dump_path)
+
+    # Save screenshot
+    screenshot_path = config.DATA_DIR / "debug_search_screenshot.png"
+    await page.screenshot(path=str(screenshot_path), full_page=True)
+    logger.info("Debug screenshot saved to %s", screenshot_path)
+
+    # Log actual URL to detect redirects
+    logger.info("Actual page URL: %s", page.url)
 
     await page.close()
     return str(dump_path)

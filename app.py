@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 
 import config
 from models import SessionExpiredError
-from ollama_client import check_ollama_health, translate_to_search_terms
+from ollama_client import check_ollama_health, translate_to_search_terms, warm_up_model
 from scraper_search import scrape_search
 from session_manager import BrowserSessionManager
 from storage import save_products
@@ -45,6 +45,9 @@ async def lifespan(app: FastAPI):
             "Could not connect to Chrome: %s. "
             "Run 'python main.py --login' first to launch Chrome with remote debugging.", e
         )
+
+    # Pre-load the Ollama model so the first user request is fast
+    await warm_up_model()
 
     yield
 
@@ -96,6 +99,16 @@ async def websocket_endpoint(websocket: WebSocket):
             })
 
             result = await translate_to_search_terms(user_text, conversation_history)
+
+            if result["action"] == "error":
+                # Ollama connectivity issue — notify user but do NOT add to
+                # conversation history so the error text doesn't confuse future
+                # Ollama calls.
+                await websocket.send_json({
+                    "type": "error",
+                    "text": result["text"],
+                })
+                continue
 
             if result["action"] == "question":
                 await websocket.send_json({

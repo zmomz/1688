@@ -42,6 +42,25 @@ async def check_ollama_health() -> bool:
         return False
 
 
+async def warm_up_model() -> None:
+    """Send a short request to pre-load the model into memory."""
+    try:
+        logger.info("Warming up Ollama model '%s'...", config.OLLAMA_MODEL)
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                f"{config.OLLAMA_URL}/api/chat",
+                json={
+                    "model": config.OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+            )
+            resp.raise_for_status()
+        logger.info("Ollama model warm-up complete.")
+    except Exception as e:
+        logger.warning("Ollama warm-up failed (model will load on first request): %s", e)
+
+
 def _format_history(conversation_history: list[dict]) -> str:
     """Format conversation history for the prompt."""
     lines = []
@@ -72,7 +91,8 @@ async def translate_to_search_terms(
     messages.append({"role": "user", "content": user_message})
 
     try:
-        async with httpx.AsyncClient(timeout=config.OLLAMA_TIMEOUT) as client:
+        timeout = httpx.Timeout(10.0, read=config.OLLAMA_TIMEOUT)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 f"{config.OLLAMA_URL}/api/chat",
                 json={
@@ -118,15 +138,21 @@ async def translate_to_search_terms(
             "action": "question",
             "text": "I had trouble processing that. Could you rephrase your product request?",
         }
-    except httpx.HTTPError as e:
-        logger.error("Ollama API error: %s", e)
+    except httpx.TimeoutException as e:
+        logger.error("Ollama request timed out after %ss: %s", config.OLLAMA_TIMEOUT, e)
         return {
-            "action": "question",
-            "text": f"Could not reach Ollama ({e}). Make sure Ollama is running.",
+            "action": "error",
+            "text": f"Ollama timed out after {config.OLLAMA_TIMEOUT}s. The model may be loading or overloaded.",
+        }
+    except httpx.HTTPError as e:
+        logger.error("Ollama API error (%s): %s", type(e).__name__, e)
+        return {
+            "action": "error",
+            "text": f"Could not reach Ollama ({type(e).__name__}: {e}). Make sure Ollama is running.",
         }
     except Exception as e:
         logger.error("Unexpected error calling Ollama: %s", e)
         return {
-            "action": "question",
+            "action": "error",
             "text": f"An error occurred: {e}",
         }

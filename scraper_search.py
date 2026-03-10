@@ -35,6 +35,11 @@ SEARCH_BUTTON_SELECTORS = [
     '.alisearch-btn',
     '[class*="search"] button',
     '[class*="SearchBtn"]',
+    '.home-header button',
+    '[class*="search-bar"] button',
+    '[class*="searchbar"] button',
+    'form[action*="search"] button',
+    '#alisearch-submit',
 ]
 
 HOMEPAGE_URL = "https://www.1688.com/"
@@ -215,13 +220,8 @@ async def _search_via_searchbox(page: Page, keyword: str) -> bool:
     # Type keyword like a human
     await _human_type(page, input_selector, keyword)
 
-    # Dismiss autocomplete dropdown before submitting
-    await page.keyboard.press("Escape")
-    await asyncio.sleep(0.3)
-
-    # Re-focus the search input
-    await page.click(input_selector)
-    await asyncio.sleep(0.2)
+    # Brief pause to let autocomplete render (do NOT press Escape — it clears the input)
+    await asyncio.sleep(0.5)
 
     # Capture current URL to verify navigation later
     url_before = page.url
@@ -232,23 +232,33 @@ async def _search_via_searchbox(page: Page, keyword: str) -> bool:
         logger.info("Clicking search button: %s", btn_selector)
         await btn_el.click()
     else:
-        # Fallback: press Enter
+        # Fallback: press Enter directly in the input (no Escape/re-focus)
         logger.info("No search button found, pressing Enter")
         await page.keyboard.press("Enter")
 
-    # Wait for navigation to search results
+    # Wait for actual navigation to search results
+    navigated = False
+    try:
+        await page.wait_for_url("**/offer_search*", timeout=config.PAGE_TIMEOUT)
+        navigated = True
+    except Exception:
+        logger.debug("wait_for_url timed out, checking URL manually")
+
+    if not navigated:
+        # Extra grace period then check
+        await asyncio.sleep(3)
+
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=config.PAGE_TIMEOUT)
     except Exception:
         pass
-    await asyncio.sleep(3)
     try:
         await page.wait_for_load_state("networkidle", timeout=config.NETWORK_IDLE_TIMEOUT)
     except Exception:
         logger.debug("networkidle timeout after search, proceeding")
 
     # Verify we actually navigated to search results
-    if page.url == url_before or "offer_search" not in page.url:
+    if "offer_search" not in page.url:
         logger.warning(
             "Search box did not navigate (still at %s), falling back to direct URL",
             page.url,

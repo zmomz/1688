@@ -37,7 +37,7 @@ OUTPUT_FORMAT = "json"  # "json" or "csv"
 # --- Ollama ---
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:7b"
-OLLAMA_TIMEOUT = 120  # seconds
+OLLAMA_TIMEOUT = 300  # seconds
 
 # --- Web App ---
 WEB_HOST = "0.0.0.0"

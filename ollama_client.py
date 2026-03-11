@@ -16,9 +16,11 @@ Output ONLY JSON: {"action": "search", "terms": ["term1", "term2", ...]}
 Or for non-product questions: {"action": "question", "text": "answer"}
 
 Rules:
-- Terms MUST be in Simplified Chinese only
+- Terms MUST be 100% Simplified Chinese. ZERO English/Arabic/Latin letters allowed. Translate everything.
+  WRONG: "汽车primer" or "2K清漆klier"
+  RIGHT: "汽车底漆" or "2K清漆"
 - One term per distinct product. Group similar items (e.g. all sandpaper grits → one term)
-- Prefix each term with its industry domain to avoid wrong results (汽车 for auto, 医用 for medical, 工业 for industrial, etc.)
+- Prefix each term with its industry domain (汽车 for auto, 医用 for medical, 工业 for industrial, etc.)
 - Use specific 1688 product names, not vague translations
 - Product lists → search immediately, never ask questions
 - Max 15 terms even for large lists (group related items)

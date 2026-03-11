@@ -17,6 +17,10 @@ def generate_filename(keyword: str, fmt: str) -> Path:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     safe_keyword = "".join(c if c.isalnum() or c in "-_" else "_" for c in keyword)
+    # Windows has a 260-char path limit; truncate the keyword portion
+    max_keyword_len = 150
+    if len(safe_keyword) > max_keyword_len:
+        safe_keyword = safe_keyword[:max_keyword_len]
     return config.DATA_DIR / f"{safe_keyword}_{timestamp}.{fmt}"
 
 
